@@ -1,0 +1,162 @@
+---
+title: "Dumbell Exercise Prediction Project"
+author: "Sanjeev Varma"
+date: "Wednesday, June 17, 2015"
+output: html_document
+---
+
+---
+title: "Machine Learning Project"
+author: "Sanjeev Varma"
+date: "Saturday, June 13, 2015"
+output: html_document
+---
+This data was accumulated from sensors fitted to measure the motions of people doing dumbell exercises to establish how efficiently the exercise was being done. Sensors were mounted in the users' glove, armband, lumbar belt and dumbell. Participants were asked to perform one set of 10 repetitions
+of the Unilateral Dumbbell Biceps Curl in five different fashions:
+exactly according to the specification (Class A), throwing
+the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise,while the other 4 classes correspond to common mistakes.Participants were supervised by an experienced weight lifter to make sure the execution complied to the manner they were supposed to simulate. 
+
+Sensor data was accumulated and some derived data was computed from the generated data which is part of the data set provided, which we first read in. This dataset comes along with a test dataset of 20 observations for which we have to predict the outcome, based on the model built on top of the training data. We start by reading in the training data.
+
+```{r, message=FALSE, warning=FALSE}
+library(caret)
+library(stats)
+library(randomForest)
+library(plyr)
+
+raw <- read.csv("~/pml-training.csv")
+```
+### Data Processing
+The dataset has almost 20k observations of 160 variables. However, on closer inspection a large number of those variables (about 100) are computed variables for time window summaries and not data reported by the sensors. There are about 400 time windows in the data set and it is only those 400 rows that have data for those 100 variables, the rest are NA. However, the test set just provides us with *sensor data* and not *derived window summaries*. Furthermore, the prediction model will have to make predictions off sensor data and not time window summary data. **Consequently, the time window summary data is of no use to us to build a prediction model**. So, we remove all the columns where the first row in that column is NA.
+```{r}
+for (i in 160:1) { if (raw[[2,i]] == "" | is.na(raw[[2,i]])) {raw[,i] = NULL}}
+```
+
+This reduces the dataset from 160 to 60 variables. Now, if we take a look at the first 7 variables we realize that these variables pertain to users, timestamps and time windows and are not sensor data. Since the prediction model will be used for as yet unknown users at various times, *these 7 variables are also no use to us for predicting the efficiency of the exercise being performed which can only come from sensor data*. So, we remove the first 7 variables as well and now we are left with 53 variable to choose predictors from.
+```{r}
+for (i in 7:1) {raw[,i]=NULL}
+dim(raw)
+```
+Of these 53 variables, the last one is the 'classe' variable that tells us the class of the outcome for the corresponding observation. The first 52 variables are the ones that are the sensor data and this is what the prediction model will need to consume for the right classification. Now we need to pick the right predictors and parameters for those predictors.The first thing we check is to see what the frequency of the "classe" variable is, to decide if the outcomes need to be weighted.
+
+```{r}
+b <- count(df=raw, vars="classe")
+plot(b)
+
+```
+
+The spread of the error outcomes (B through E) is fairly even and the correct execution outcome A is well represented. *So it does not look like any outcome variable weighting needs to be done*. Now, lets look at the rest of the variables and see if there are some variables that are near zero that can be eliminated from the predictor list.
+
+```{r}
+nsv<-nearZeroVar(raw[,1:52],saveMetrics=TRUE)
+nsv$nzv
+```
+
+All of the variables are designated as FALSE so it appears that none of the variables above can be eliminated as predictors because they have zero or near zero variance, because none of them do. So all of them stay.
+
+Now we will build the models. Some of the models are likely to be computationally intensive so our approach will be to try a number of models on a small sample of the dataset and see which one gives us the most accuracy. Then we will select that model for a more comprehensive training on a larger data set and we will use this to predict the 20 test outcomes that are needed for the class project. These are the models that we will build:
+
+1. For one model, we will compute the Principal Components, and we will build a random forest classifier on top of the PCs
+2. Just to compare the impact of the PCs on the random forest model above, we will also build another random forest classifier on the same training data as 1. above, but without the PCs, and see how it compares with 1.
+3. We will build a classifier on the "rpart" algorithm as well.
+4. And finally, we will build a rpart2 classifier too. The difference between rpart and rpart2 is that the former uses the complexity parameter $cp$ and the latter uses the maximum tree depth $maxdepth$.
+
+We will build random forests with cross-validation which will be specified in the trainControl function with parameter method = "cv" so that R can do the cross-validation and return error rates that are averaged across the cross-validation. We will start by creating a training dataset of about 10% of the training data and a test dataset of about 5% of the training data that has been supplied. 
+
+**__For the model that turns out to be the most accurate out of these four, we will retrain it on 75% of the training data and test it on the remaining 25% of the training data. This will be our final model. We will then use this final model to make predictions for the 20 outcomes that have been asked for, in the course rubric.__**
+
+```{r, message=FALSE, warning=FALSE}
+## create training data partition
+set.seed(1231)
+intrain <- createDataPartition(raw$classe,p=0.1,list=FALSE) 
+training <- raw[intrain,]  
+
+# Preprocess with PCA, create PCA training dataset 
+preproc <- preProcess(training[,1:52],method="pca") ##preprocess with PCA
+trainpc <- predict(preproc,training[,1:52]) # create PCA training dataset
+
+#train on rf with PCA and plot Variables of Importance
+rfmodel <- train(training$classe~.,method="rf",data=trainpc, trcontrol=trainControl(method="cv")) 
+plot(varImp(rfmodel), main = "Vars of Importance for RF with PCA")
+
+# train on rf without PCA
+rf1 <- train(classe~.,method="rf",data=training,trcontrol=trainControl(method="cv"))
+plot(varImp(rf1),main="Vars of Importance for RF without PCA")
+```
+
+From the figures above it is clear that:
+1. there are more predictors for RF without PCA than RF with PCA, and; 
+2. These predictors encompass a lot more variance for RF without PCA than they do for RF with PCA. This may contribute to different accuracies for these models. Now we train for the two rpart models and investigate their classification trees.
+
+```{r, message=FALSE, warning=FALSE}
+
+# train on rpart without PCA and plot Variables of Importance
+rpartmodel <- train(classe ~., method="rpart",data=training) 
+# plot(varImp(rpartmodel), main = "Vars of Importance for rpart")
+plot(rpartmodel$finalModel,uniform=TRUE,main="Rpart Classification Tree")
+text(rpartmodel$finalModel,use.n=TRUE,all=TRUE,cex=.8)
+
+# train on rpart2 without PCA and plot variables of importance
+rpart2model <- train(classe~.,method="rpart2",data=training)
+# plot(varImp(rpart2model),main="Variables of Importance for rpart2")
+plot(rpart2model$finalModel,uniform=TRUE,main="Rpart2 Classification Tree")
+text(rpart2model$finalModel,use.n=TRUE,all=TRUE,cex=.8)
+```
+
+We see a difference in the granularity (above) of the trees associated with rpart and rpart2, which will be reflected in the accuracy models of these two classifiers.
+
+Now we will create the test data and test the models above on the test data and ascertain the accuracy/error of the models by summarizing the associated confusionMatrices.
+
+```{r}
+
+# create a test set of 5% of training data for non-PCA models
+intest <- createDataPartition(raw$classe[-intrain],p=.05,list=FALSE)
+testing <- raw[intest,]
+
+# create a PCA preprocessed test set of the same 5%
+testpc <- predict(preproc,testing[,1:52])
+
+# generate confusionMatrices for the 4 classifiers
+
+rfnopcacm <-confusionMatrix(testing$classe,predict(rfmodel,testpc)) # RF with PCA
+rfcm <- confusionMatrix(testing$classe,predict(rf1,testing)) # rf without PCA
+rpartcm <- confusionMatrix(testing$classe,predict(rpartmodel,testing)) # rpart without PCA
+rpart2cm <- confusionMatrix(testing$classe,predict(rpart2model,testing)) #rpart2 w/o PCA
+
+cvValues <- resamples(list(RF_without_PCA = rf1, 
+                          RF_with_PCA = rfmodel,
+                          Rpart = rpartmodel,
+                          Rpart2 = rpart2model))
+summary(cvValues)
+```
+
+The data above shows a summary of the differences of accuracy between the various models. A detailed look at any particular model's accuracy can be delivered by looking at the results of the confusionMatrix for the evaluation of that model. This is a verbose exercise so we will not do it for all of them, except for one - the RF without PCA classifer - which is the best performing classifier of the four. **That accuracy detail is shown below and has been calculated after cross-validation, so all the accuracy/error estimates are indicative of averaging across multiple cross-validation iterations.**
+
+```{r}
+rfnopcacm
+```
+
+Since the Random Forest without PCA classifier has performed the best, we will train that on 75% of the training data set, use the other 25% for testing, note its accuracy statistics and then apply it to the 20 outcome test data that has been provided for the project. This will give us 20 classifications from A-E and we will submit that for the class project evaluation. First, we will train a Random Forest classifier on 75% of the training set. **We will cross-validate in the training process (method = "cv") so that the resultant accuracy and error estimates reflect the cross-validation exercise.**
+
+```{r}
+set.seed(1231)
+intrain <- createDataPartition(raw$classe,p=0.75,list=FALSE) 
+training <- raw[intrain,]
+testing <- raw[-intrain,]
+finalmodel <- train(classe~.,method="rf",data=training,trcontrol=trainControl(method="cv"))
+confusionMatrix(testing$classe,predict(finalmodel,testing))
+```
+
+This gives us the final model and its accuracy and error estimates. Now we will apply this classifier to the 20 outcome test data supplied and get 20 classifications between A-E. 
+
+### Results
+Now we will apply the final classifier above to the prediction that needs to be made for the 20 outcomes in the test set. 
+```{r}
+
+finaltest <- read.csv("~/pml-testing.csv")
+
+results <- predict(finalmodel,finaltest)
+results
+```
+
+The prediction on the 20 outcome test is listed above. This is what will be submitted for the course project grading. Hope its somewhere close to the truth. :-)
